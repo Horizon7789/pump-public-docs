@@ -25,7 +25,9 @@ jobs:
     timeout-minutes: 10
     env:
       RPC_URL: ${{ inputs.rpc_url || 'https://api.mainnet-beta.solana.com' }}
-      POOL: ${{ inputs.pool || vars.AUDIT_POOL }}
+      # IMPORTANT: this must be a Pool account, never the PumpSwap program ID.
+      # The documented example pool is used when no repository variable is set.
+      POOL: ${{ inputs.pool || vars.AUDIT_POOL || 'GseMAnNDvntR5uFePZ51yZBXzNSn7GdFPkfHwfr6d77J' }}
       PUMPSWAP_PROGRAM: pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA
       TOKEN_PROGRAM: TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA
       TOKEN_2022_PROGRAM: TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb
@@ -38,9 +40,13 @@ jobs:
         run: |
           set -euo pipefail
           test -n "${POOL:-}" || {
-            echo 'No pool supplied. Set repository variable AUDIT_POOL or dispatch with pool=...'
+            echo 'No pool supplied.'
             exit 1
           }
+          if [ "$POOL" = "$PUMPSWAP_PROGRAM" ]; then
+            echo 'ERROR: POOL is the PumpSwap program address, not a Pool account.'
+            exit 1
+          fi
 
       - name: Run permissionless invariant checks
         run: |
