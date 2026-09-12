@@ -1,7 +1,14 @@
 #!/usr/bin/env node
 'use strict';
 
-const { Connection, PublicKey, Transaction, TransactionInstruction, SystemProgram } = require('@solana/web3.js');
+const {
+  Connection,
+  PublicKey,
+  TransactionInstruction,
+  TransactionMessage,
+  VersionedTransaction,
+  SystemProgram,
+} = require('@solana/web3.js');
 const bs58 = require('bs58').default || require('bs58');
 const fs = require('fs');
 
@@ -75,16 +82,26 @@ function replaceU64(ix, offset, value) {
 }
 
 async function simulate(ix, label) {
-  const tx = new Transaction();
-  tx.recentBlockhash = (await connection.getLatestBlockhash('confirmed')).blockhash;
-  const signer = ix.keys.find(k => k.isSigner)?.pubkey;
-  tx.feePayer = signer || SystemProgram.programId;
-  tx.add(ix);
+  const latest = await connection.getLatestBlockhash('confirmed');
+  const signer = ix.keys.find(k => k.isSigner)?.pubkey || SystemProgram.programId;
+
+  // The config overload (sigVerify/replaceRecentBlockhash) is defined for
+  // VersionedTransaction. Passing that config to the legacy Transaction
+  // overload is interpreted as the signers argument and throws "Invalid
+  // arguments" in web3.js. Compile a minimal v0 message instead.
+  const message = new TransactionMessage({
+    payerKey: signer,
+    recentBlockhash: latest.blockhash,
+    instructions: [ix],
+  }).compileToV0Message();
+  const tx = new VersionedTransaction(message);
+
   const result = await connection.simulateTransaction(tx, {
     sigVerify: false,
     replaceRecentBlockhash: true,
     commitment: 'confirmed',
   });
+
   return {
     label,
     succeeded: result.value.err === null,
