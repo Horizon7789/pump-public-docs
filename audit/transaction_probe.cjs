@@ -8,9 +8,7 @@ const {
   TransactionMessage,
   VersionedTransaction,
   SystemProgram,
-  AddressLookupTableAccount,
 } = require('@solana/web3.js');
-const bs58 = require('bs58').default || require('bs58');
 const fs = require('fs');
 
 const RPC = process.env.RPC_URL || 'https://api.mainnet-beta.solana.com';
@@ -40,37 +38,6 @@ async function getPoolState() {
   };
 }
 
-function accountMeta(pubkey, writableSet, signerSet) {
-  return {
-    pubkey,
-    isSigner: signerSet.has(pubkey.toBase58()),
-    isWritable: writableSet.has(pubkey.toBase58()),
-  };
-}
-
-function parsedInstructionToInstruction(parsedIx, accountMap) {
-  const writable = new Set();
-  const signers = new Set();
-  for (const key of accountMap) {
-    if (key.writable) writable.add(key.pubkey.toBase58());
-    if (key.signer) signers.add(key.pubkey.toBase58());
-  }
-
-  const keys = parsedIx.accounts.map(pubkey => accountMeta(pubkey, writable, signers));
-  return new TransactionInstruction({
-    programId: parsedIx.programId,
-    keys,
-    data: Buffer.from(bs58.decode(parsedIx.data)),
-  });
-}
-
-function parsedMessageInstructions(tx) {
-  const accountMap = tx.transaction.message.accountKeys;
-  return tx.transaction.message.instructions.map(ix =>
-    parsedInstructionToInstruction(ix, accountMap),
-  );
-}
-
 function replacePair(ix, a, b) {
   return new TransactionInstruction({
     programId: ix.programId,
@@ -96,17 +63,35 @@ function replaceU64(ix, offset, value) {
   return new TransactionInstruction({ programId: ix.programId, keys: ix.keys, data });
 }
 
-async function getLookupTables(tx) {
-  const lookups = tx.transaction.message.addressTableLookups || [];
+async function loadRawTransaction(signature) {
+  const tx = await connection.getTransaction(signature, {
+    encoding: 'base64',
+    maxSupportedTransactionVersion: 0,
+    commitment: 'confirmed',
+  });
+  if (!tx) return null;
+  const raw = tx.transaction?.[0];
+  if (!raw) throw new Error(`Missing raw transaction bytes for ${signature}`);
+  return {
+    tx,
+    versioned: VersionedTransaction.deserialize(Buffer.from(raw, 'base64')),
+  };
+}
+
+async function getLookupTables(versioned) {
+  const lookups = versioned.message.addressTableLookups || [];
   if (lookups.length === 0) return [];
   const tables = await Promise.all(
-    lookups.map(async lookup => {
-      const result = await connection.getAddressLookupTable(lookup.accountKey, 'confirmed');
-      return result.value;
-    }),
+    lookups.map(async lookup => (await connection.getAddressLookupTable(lookup.accountKey, 'confirmed')).value),
   );
   if (tables.some(table => !table)) throw new Error('Unable to resolve one or more address lookup tables');
   return tables;
+}
+
+function decompile(versioned, lookupTables) {
+  return TransactionMessage.decompile(versioned.message, {
+    addressLookupTableAccounts: lookupTables,
+  });
 }
 
 function findPumpSwapIndex(instructions) {
@@ -142,40 +127,64 @@ async function simulateContext(instructions, payer, lookupTables, label) {
   const state = await getPoolState();
   const signatures = await connection.getSignaturesForAddress(POOL, { limit: 40 }, 'confirmed');
   let sample = null;
+  let candidateErrors = [];
 
   for (const item of signatures) {
     if (item.err) continue;
-    const tx = await connection.getParsedTransaction(item.signature, {
-      maxSupportedTransactionVersion: 0,
-      commitment: 'confirmed',
-    });
-    if (!tx) continue;
-    const instructions = parsedMessageInstructions(tx);
-    const pumpIndex = findPumpSwapIndex(instructions);
-    if (pumpIndex >= 0) {
-      sample = { signature: item.signature, tx, instructions, pumpIndex };
+    try {
+      const loaded = await loadRawTransaction(item.signature);
+      if (!loaded) continue;
+      const lookupTables = await getLookupTables(loaded.versioned);
+      const message = decompile(loaded.versioned, lookupTables);
+      const pumpIndex = findPumpSwapIndex(message.instructions);
+      if (pumpIndex < 0) continue;
+
+      const payer = message.payerKey;
+      const baseline = await simulateContext(message.instructions, payer, lookupTables, 'candidate-baseline');
+      if (!baseline.succeeded) {
+        candidateErrors.push({ signature: item.signature, err: baseline.err });
+        continue;
+      }
+
+      sample = {
+        signature: item.signature,
+        instructions: message.instructions,
+        pumpIndex,
+        payer,
+        lookupTables,
+        baseline,
+      };
       break;
+    } catch (error) {
+      candidateErrors.push({ signature: item.signature, error: String(error.message || error) });
     }
   }
 
-  if (!sample) throw new Error('No recent replayable PumpSwap transaction found for this pool');
+  if (!sample) {
+    const report = {
+      pool: POOL.toBase58(),
+      candidatesChecked: signatures.length,
+      inconclusive: true,
+      reason: 'No recent PumpSwap transaction could be replayed successfully at current state.',
+      candidateErrors,
+      safety: 'Simulation only. No transaction is broadcast or persisted.',
+    };
+    fs.writeFileSync('transaction-probe-report.json', JSON.stringify(report, null, 2));
+    console.log(JSON.stringify(report, null, 2));
+    console.error('INCONCLUSIVE: no current-state replayable historical PumpSwap transaction found.');
+    process.exit(0);
+  }
 
   const baseIx = sample.instructions[sample.pumpIndex];
   const discriminator = baseIx.data.subarray(0, 8).toString('hex');
   const instruction = DISCRIMINATORS[discriminator] || 'unknown';
-  const payer = sample.tx.transaction.message.accountKeys.find(k => k.signer)?.pubkey;
-  if (!payer) throw new Error('Historical transaction has no signer/fee payer');
-
-  const lookupTables = await getLookupTables(sample.tx);
-  const probes = [];
-
-  probes.push(await simulateContext(sample.instructions, payer, lookupTables, `baseline:${instruction}`));
+  const probes = [sample.baseline];
 
   const mutate = async (label, mutation) => {
     const instructions = sample.instructions.map((ix, index) =>
       index === sample.pumpIndex ? mutation(ix) : ix,
     );
-    probes.push(await simulateContext(instructions, payer, lookupTables, label));
+    probes.push(await simulateContext(instructions, sample.payer, sample.lookupTables, label));
   };
 
   await mutate('vault-substitution', ix => replacePair(ix, state.baseVault, state.quoteVault));
@@ -189,10 +198,7 @@ async function simulateContext(instructions, payer, lookupTables, label) {
     await mutate('limit-max', ix => replaceU64(ix, 16, 0xffffffffffffffffn));
   }
 
-  const baseline = probes.find(p => p.label.startsWith('baseline:'));
-  const suspicious = baseline?.succeeded ? probes.filter(p => !p.label.startsWith('baseline:') && p.succeeded) : [];
-  const inconclusive = !baseline || !baseline.succeeded;
-
+  const suspicious = probes.filter(p => p.label !== 'candidate-baseline' && p.succeeded);
   const report = {
     pool: POOL.toBase58(),
     sampleSignature: sample.signature,
@@ -200,9 +206,9 @@ async function simulateContext(instructions, payer, lookupTables, label) {
     discriminator,
     originalInstructionCount: sample.instructions.length,
     targetInstructionIndex: sample.pumpIndex,
-    addressLookupTables: lookupTables.length,
-    baselineSucceeded: !!baseline?.succeeded,
-    inconclusive,
+    addressLookupTables: sample.lookupTables.length,
+    baselineSucceeded: sample.baseline.succeeded,
+    inconclusive: false,
     suspicious,
     probes,
     state: Object.fromEntries(Object.entries(state).map(([k, v]) => [k, v.toBase58()])),
@@ -215,11 +221,6 @@ async function simulateContext(instructions, payer, lookupTables, label) {
   if (suspicious.length > 0) {
     console.error(`FAIL: ${suspicious.length} mutation probe(s) unexpectedly succeeded.`);
     process.exit(2);
-  }
-
-  if (inconclusive) {
-    console.error('INCONCLUSIVE: the selected historical transaction did not replay successfully at current state.');
-    process.exit(0);
   }
 
   console.log('PASS: all mutation probes were rejected by the current program state.');
