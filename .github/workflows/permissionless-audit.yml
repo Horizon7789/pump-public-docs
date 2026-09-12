@@ -22,11 +22,9 @@ jobs:
   invariant-audit:
     name: PumpSwap permissionless invariants
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     env:
       RPC_URL: ${{ inputs.rpc_url || 'https://api.mainnet-beta.solana.com' }}
-      # IMPORTANT: this must be a Pool account, never the PumpSwap program ID.
-      # The documented example pool is used when no repository variable is set.
       POOL: ${{ inputs.pool || vars.AUDIT_POOL || 'GseMAnNDvntR5uFePZ51yZBXzNSn7GdFPkfHwfr6d77J' }}
       PUMPSWAP_PROGRAM: pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA
       TOKEN_PROGRAM: TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA
@@ -58,10 +56,23 @@ jobs:
             --token-program "$TOKEN_PROGRAM" \
             --token-2022-program "$TOKEN_2022_PROGRAM"
 
-      - name: Upload audit report
+      - name: Install transaction probe dependencies
+        run: |
+          set -euo pipefail
+          npm init -y >/dev/null 2>&1
+          npm install --no-audit --no-fund @solana/web3.js bs58
+
+      - name: Run transaction-level permissionless probes
+        run: |
+          set -euo pipefail
+          node audit/transaction_probe.cjs
+
+      - name: Upload audit reports
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: permissionless-audit-report
-          path: audit-report.json
+          name: permissionless-audit-reports
+          path: |
+            audit-report.json
+            transaction-probe-report.json
           if-no-files-found: ignore
