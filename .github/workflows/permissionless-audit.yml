@@ -1,6 +1,10 @@
 name: Permissionless Security Audit
 
 on:
+  push:
+    paths:
+      - 'audit/**'
+      - '.github/workflows/permissionless-audit.yml'
   workflow_dispatch:
     inputs:
       pool:
