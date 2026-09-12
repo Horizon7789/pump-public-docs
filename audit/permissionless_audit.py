@@ -13,13 +13,27 @@ import struct
 import sys
 import urllib.request
 
-POOL_VIRTUAL_QUOTE_OFFSET = 245
+# Anchor account data includes an 8-byte discriminator before Pool fields.
+# Pool layout (current public docs):
+# discriminator(8), pool_bump(u8), index(u16), creator(pubkey),
+# base_mint(pubkey), quote_mint(pubkey), lp_mint(pubkey),
+# pool_base_token_account(pubkey), pool_quote_token_account(pubkey),
+# lp_supply(u64), coin_creator(pubkey), is_mayhem_mode(bool),
+# is_cashback_coin(bool), virtual_quote_reserves(i128).
+POOL_BUMP_OFFSET = 8
+POOL_INDEX_OFFSET = 9
+POOL_CREATOR_OFFSET = 11
+POOL_BASE_MINT_OFFSET = 43
+POOL_QUOTE_MINT_OFFSET = 75
+POOL_LP_MINT_OFFSET = 107
+POOL_BASE_VAULT_OFFSET = 139
+POOL_QUOTE_VAULT_OFFSET = 171
 POOL_LP_SUPPLY_OFFSET = 203
-POOL_BASE_MINT_OFFSET = 11
-POOL_QUOTE_MINT_OFFSET = 43
-POOL_LP_MINT_OFFSET = 75
-POOL_BASE_VAULT_OFFSET = 107
-POOL_QUOTE_VAULT_OFFSET = 139
+POOL_COIN_CREATOR_OFFSET = 211
+POOL_MAYHEM_OFFSET = 243
+POOL_CASHBACK_OFFSET = 244
+POOL_VIRTUAL_QUOTE_OFFSET = 245
+POOL_MIN_SIZE = POOL_VIRTUAL_QUOTE_OFFSET + 16
 
 SPL_TOKEN = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
 TOKEN_2022 = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
@@ -55,7 +69,7 @@ def base58(data):
     while n:
         n, r = divmod(n, 58)
         out = alphabet[r] + out
-    return "1" * (len(data) - len(data.lstrip(b"\\0"))) + (out or "")
+    return "1" * (len(data) - len(data.lstrip(b"\0"))) + (out or "")
 
 
 def token_account_amount(raw):
@@ -99,7 +113,7 @@ def main():
     else:
         report["checks"].append("POOL_OWNER_MATCH")
 
-    if len(pool) < POOL_VIRTUAL_QUOTE_OFFSET + 16:
+    if len(pool) < POOL_MIN_SIZE:
         raise RuntimeError(f"Pool account too small for documented layout: {len(pool)} bytes")
 
     lp_supply = struct.unpack_from("<Q", pool, POOL_LP_SUPPLY_OFFSET)[0]
