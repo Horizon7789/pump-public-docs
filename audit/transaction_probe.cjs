@@ -156,7 +156,7 @@ async function simulateContext(instructions, payer, lookupTables, label) {
 
 (async () => {
   const state = await getPoolState();
-  const signatures = await rpc('getSignaturesForAddress', [POOL.toBase58(), { limit: 25 }, { commitment: 'confirmed' }]);
+  const signatures = await rpc('getSignaturesForAddress', [POOL.toBase58(), { limit: 25, commitment: 'confirmed' }]);
   let sample = null;
   const candidateErrors = [];
 
