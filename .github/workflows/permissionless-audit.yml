@@ -1,0 +1,61 @@
+name: Permissionless Security Audit
+
+on:
+  workflow_dispatch:
+    inputs:
+      pool:
+        description: 'PumpSwap Pool account to audit'
+        required: true
+        type: string
+      rpc_url:
+        description: 'Solana JSON-RPC endpoint'
+        required: false
+        default: 'https://api.mainnet-beta.solana.com'
+        type: string
+  schedule:
+    - cron: '17 3 * * 1'
+
+permissions:
+  contents: read
+
+jobs:
+  invariant-audit:
+    name: PumpSwap permissionless invariants
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      RPC_URL: ${{ inputs.rpc_url || 'https://api.mainnet-beta.solana.com' }}
+      POOL: ${{ inputs.pool || vars.AUDIT_POOL }}
+      PUMPSWAP_PROGRAM: pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA
+      TOKEN_PROGRAM: TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA
+      TOKEN_2022_PROGRAM: TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify audit target
+        run: |
+          set -euo pipefail
+          test -n "${POOL:-}" || {
+            echo 'No pool supplied. Set repository variable AUDIT_POOL or dispatch with pool=...'
+            exit 1
+          }
+
+      - name: Run permissionless invariant checks
+        run: |
+          set -euo pipefail
+          python3 audit/permissionless_audit.py \
+            --rpc "$RPC_URL" \
+            --pool "$POOL" \
+            --pumpswap-program "$PUMPSWAP_PROGRAM" \
+            --token-program "$TOKEN_PROGRAM" \
+            --token-2022-program "$TOKEN_2022_PROGRAM"
+
+      - name: Upload audit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: permissionless-audit-report
+          path: audit-report.json
+          if-no-files-found: ignore
