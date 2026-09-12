@@ -22,6 +22,33 @@ const DISCRIMINATORS = {
   'b712469c946da122': 'withdraw',
 };
 
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+async function rpc(method, params, attempts = 5) {
+  let lastError;
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    try {
+      const response = await fetch(RPC, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ jsonrpc: '2.0', id: Date.now(), method, params }),
+      });
+      if (response.status === 429 || response.status >= 500) {
+        const retryAfter = Number(response.headers.get('retry-after') || 0);
+        await sleep(retryAfter > 0 ? retryAfter * 1000 : 1000 * (attempt + 1));
+        continue;
+      }
+      const body = await response.json();
+      if (body.error) throw new Error(`${method}: ${JSON.stringify(body.error)}`);
+      return body.result;
+    } catch (error) {
+      lastError = error;
+      if (attempt + 1 < attempts) await sleep(750 * (attempt + 1));
+    }
+  }
+  throw lastError || new Error(`${method} failed`);
+}
+
 function poolPubkey(raw, offset) {
   return new PublicKey(raw.subarray(offset, offset + 32));
 }
@@ -59,21 +86,22 @@ function replaceOne(ix, a, b) {
 
 function replaceU64(ix, offset, value) {
   const data = Buffer.from(ix.data);
+  if (data.length < offset + 8) return ix;
   data.writeBigUInt64LE(BigInt(value), offset);
   return new TransactionInstruction({ programId: ix.programId, keys: ix.keys, data });
 }
 
 async function loadRawTransaction(signature) {
-  const tx = await connection.getTransaction(signature, {
+  const result = await rpc('getTransaction', [signature, {
     encoding: 'base64',
     maxSupportedTransactionVersion: 0,
     commitment: 'confirmed',
-  });
-  if (!tx) return null;
-  const raw = tx.transaction?.[0];
+  }]);
+  if (!result) return null;
+  const raw = result.transaction?.[0];
   if (!raw) throw new Error(`Missing raw transaction bytes for ${signature}`);
   return {
-    tx,
+    tx: result,
     versioned: VersionedTransaction.deserialize(Buffer.from(raw, 'base64')),
   };
 }
@@ -81,10 +109,13 @@ async function loadRawTransaction(signature) {
 async function getLookupTables(versioned) {
   const lookups = versioned.message.addressTableLookups || [];
   if (lookups.length === 0) return [];
-  const tables = await Promise.all(
-    lookups.map(async lookup => (await connection.getAddressLookupTable(lookup.accountKey, 'confirmed')).value),
-  );
-  if (tables.some(table => !table)) throw new Error('Unable to resolve one or more address lookup tables');
+  const tables = [];
+  for (const lookup of lookups) {
+    const table = (await connection.getAddressLookupTable(lookup.accountKey, 'confirmed')).value;
+    if (!table) throw new Error(`Unable to resolve lookup table ${lookup.accountKey.toBase58()}`);
+    tables.push(table);
+    await sleep(150);
+  }
   return tables;
 }
 
@@ -125,9 +156,9 @@ async function simulateContext(instructions, payer, lookupTables, label) {
 
 (async () => {
   const state = await getPoolState();
-  const signatures = await connection.getSignaturesForAddress(POOL, { limit: 40 }, 'confirmed');
+  const signatures = await rpc('getSignaturesForAddress', [POOL.toBase58(), { limit: 25 }, { commitment: 'confirmed' }]);
   let sample = null;
-  let candidateErrors = [];
+  const candidateErrors = [];
 
   for (const item of signatures) {
     if (item.err) continue;
@@ -139,8 +170,7 @@ async function simulateContext(instructions, payer, lookupTables, label) {
       const pumpIndex = findPumpSwapIndex(message.instructions);
       if (pumpIndex < 0) continue;
 
-      const payer = message.payerKey;
-      const baseline = await simulateContext(message.instructions, payer, lookupTables, 'candidate-baseline');
+      const baseline = await simulateContext(message.instructions, message.payerKey, lookupTables, 'candidate-baseline');
       if (!baseline.succeeded) {
         candidateErrors.push({ signature: item.signature, err: baseline.err });
         continue;
@@ -150,7 +180,7 @@ async function simulateContext(instructions, payer, lookupTables, label) {
         signature: item.signature,
         instructions: message.instructions,
         pumpIndex,
-        payer,
+        payer: message.payerKey,
         lookupTables,
         baseline,
       };
@@ -158,6 +188,7 @@ async function simulateContext(instructions, payer, lookupTables, label) {
     } catch (error) {
       candidateErrors.push({ signature: item.signature, error: String(error.message || error) });
     }
+    await sleep(250);
   }
 
   if (!sample) {
@@ -181,10 +212,9 @@ async function simulateContext(instructions, payer, lookupTables, label) {
   const probes = [sample.baseline];
 
   const mutate = async (label, mutation) => {
-    const instructions = sample.instructions.map((ix, index) =>
-      index === sample.pumpIndex ? mutation(ix) : ix,
-    );
+    const instructions = sample.instructions.map((ix, index) => index === sample.pumpIndex ? mutation(ix) : ix);
     probes.push(await simulateContext(instructions, sample.payer, sample.lookupTables, label));
+    await sleep(200);
   };
 
   await mutate('vault-substitution', ix => replacePair(ix, state.baseVault, state.quoteVault));
@@ -224,4 +254,7 @@ async function simulateContext(instructions, payer, lookupTables, label) {
   }
 
   console.log('PASS: all mutation probes were rejected by the current program state.');
-})();
+})().catch(error => {
+  console.error(`PROBE ERROR: ${error.stack || error}`);
+  process.exit(1);
+});
