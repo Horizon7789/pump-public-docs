@@ -70,6 +70,12 @@ def mint_supply(raw):
     return struct.unpack_from("<Q", raw, 36)[0]
 
 
+def signed_i128_le(raw, offset):
+    if len(raw) < offset + 16:
+        raise RuntimeError("account is too small for i128")
+    return int.from_bytes(raw[offset:offset + 16], "little", signed=True)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--rpc", required=True)
@@ -97,7 +103,7 @@ def main():
         raise RuntimeError(f"Pool account too small for documented layout: {len(pool)} bytes")
 
     lp_supply = struct.unpack_from("<Q", pool, POOL_LP_SUPPLY_OFFSET)[0]
-    virtual_quote = struct.unpack_from("<q", pool, POOL_VIRTUAL_QUOTE_OFFSET)[0]
+    virtual_quote = signed_i128_le(pool, POOL_VIRTUAL_QUOTE_OFFSET)
     base_mint = pubkey(pool, POOL_BASE_MINT_OFFSET)
     quote_mint = pubkey(pool, POOL_QUOTE_MINT_OFFSET)
     lp_mint = pubkey(pool, POOL_LP_MINT_OFFSET)
@@ -168,9 +174,9 @@ def main():
         report["checks"].append("LP_SUPPLY_UPPER_BOUND")
 
     # 3. Token-2022 / SPL consistency.
-    for label, mint, vault, mint_meta, vault_meta in [
-        ("base", base_mint, base_vault, None, base_meta),
-        ("quote", quote_mint, quote_vault, None, quote_meta),
+    for label, mint, vault, vault_meta in [
+        ("base", base_mint, base_vault, base_meta),
+        ("quote", quote_mint, quote_vault, quote_meta),
     ]:
         mm, _ = account(args.rpc, mint)
         expected = {args.token_program, args.token_2022_program}
@@ -189,7 +195,6 @@ def main():
         else:
             report["checks"].append(f"{label.upper()}_TOKEN_PROGRAM_MATCH")
 
-    # Stored mint/vault relationships are recorded for an on-chain follow-up.
     report["warnings"].append(
         "Static account-state checks cannot prove swap/withdraw exploitability; run transaction-level PoCs for any violation."
     )
