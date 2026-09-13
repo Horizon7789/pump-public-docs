@@ -1,0 +1,19 @@
+{
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "devnet-fixture": "tsx devnet-virtual-reserve-fixture.ts"
+  },
+  "dependencies": {
+    "@pump-fun/pump-swap-sdk": "^1.20.0",
+    "@solana/spl-token": "^0.4.9",
+    "@solana/web3.js": "^1.98.2",
+    "bn.js": "^5.2.2"
+  },
+  "devDependencies": {
+    "@types/bn.js": "^5.1.6",
+    "@types/node": "^20.8.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.2.2"
+  }
+}
