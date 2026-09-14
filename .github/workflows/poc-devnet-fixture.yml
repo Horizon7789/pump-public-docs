@@ -1,0 +1,88 @@
+name: POC - Devnet Virtual Reserve Fixture
+
+on:
+  workflow_dispatch:
+    inputs:
+      execute:
+        description: "Execute the disposable devnet fixture (requires wallet secrets)"
+        required: true
+        default: false
+        type: boolean
+      base_in:
+        description: "Base tokens to seed"
+        required: false
+        default: "4000000000"
+      quote_in:
+        description: "Initial quote liquidity in lamports"
+        required: false
+        default: "1000000000"
+      boost_quote_in:
+        description: "Boost quote amount in lamports"
+        required: false
+        default: "100000000"
+      sell_base_in:
+        description: "Base amount to sell"
+        required: false
+        default: "100000000"
+
+permissions:
+  contents: read
+
+jobs:
+  devnet-fixture:
+    name: Run disposable devnet POC
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      RPC_URL: https://api.devnet.solana.com
+      BASE_IN: ${{ inputs.base_in }}
+      QUOTE_IN: ${{ inputs.quote_in }}
+      BOOST_QUOTE_IN: ${{ inputs.boost_quote_in }}
+      SELL_BASE_IN: ${{ inputs.sell_base_in }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: poc/package-lock.json
+
+      - name: Install POC dependencies
+        working-directory: poc
+        run: npm ci --no-audit --no-fund
+
+      - name: Validate fixture configuration
+        if: ${{ !inputs.execute }}
+        working-directory: poc
+        run: npm run devnet-fixture
+
+      - name: Materialize creator keypair
+        if: ${{ inputs.execute }}
+        env:
+          ANCHOR_WALLET_JSON: ${{ secrets.POC_ANCHOR_WALLET_JSON }}
+        run: |
+          set -euo pipefail
+          test -n "$ANCHOR_WALLET_JSON"
+          umask 077
+          printf '%s' "$ANCHOR_WALLET_JSON" > "$RUNNER_TEMP/creator.json"
+
+      - name: Materialize boost authority keypair
+        if: ${{ inputs.execute }}
+        env:
+          BOOST_AUTHORITY_JSON: ${{ secrets.POC_BOOST_AUTHORITY_KEYPAIR_JSON }}
+        run: |
+          set -euo pipefail
+          test -n "$BOOST_AUTHORITY_JSON"
+          umask 077
+          printf '%s' "$BOOST_AUTHORITY_JSON" > "$RUNNER_TEMP/boost-authority.json"
+
+      - name: Execute devnet fixture
+        if: ${{ inputs.execute }}
+        working-directory: poc
+        env:
+          ANCHOR_WALLET: ${{ runner.temp }}/creator.json
+          BOOST_AUTHORITY_KEYPAIR: ${{ runner.temp }}/boost-authority.json
+        run: npm run devnet-fixture -- --execute
