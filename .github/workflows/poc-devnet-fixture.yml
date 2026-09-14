@@ -50,9 +50,15 @@ jobs:
           cache: npm
           cache-dependency-path: poc/package-lock.json
 
+      - name: Configure public npm registry
+        run: npm config set registry https://registry.npmjs.org/
+
+      - name: Verify npm registry
+        run: npm config get registry
+
       - name: Install POC dependencies
         working-directory: poc
-        run: npm ci --no-audit --no-fund
+        run: npm ci --ignore-scripts --no-audit --no-fund --registry https://registry.npmjs.org/
 
       - name: Validate fixture configuration
         if: ${{ !inputs.execute }}
