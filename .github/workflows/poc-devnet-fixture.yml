@@ -46,9 +46,9 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
-          cache-dependency-path: poc/package-lock.json
+          cache-dependency-path: poc/package.json
 
       - name: Configure public npm registry
         run: npm config set registry https://registry.npmjs.org/
@@ -56,9 +56,12 @@ jobs:
       - name: Verify npm registry
         run: npm config get registry
 
-      - name: Install POC dependencies
+      - name: Install POC dependencies from package manifest
         working-directory: poc
-        run: npm ci --ignore-scripts --no-audit --no-fund --registry https://registry.npmjs.org/
+        run: |
+          set -euo pipefail
+          rm -f package-lock.json
+          npm install --ignore-scripts --no-audit --no-fund --registry https://registry.npmjs.org/
 
       - name: Validate fixture configuration
         if: ${{ !inputs.execute }}
